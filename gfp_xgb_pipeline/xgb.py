@@ -11,6 +11,7 @@ import pandas as pd
 import time
 import logging
 import wandb
+import numpy as np
 
 def xgb_pipeline(df, run_name, fhe_mode="execute", gfp=False):
     ##################### WANDB INITIALIZATION #####################
@@ -58,8 +59,8 @@ def xgb_pipeline(df, run_name, fhe_mode="execute", gfp=False):
     #################### BAYESIAN OPTIMIZATION ####################
     # Define the parameters to tune
     param_space = {
-        "model__n_estimators": (5, 500),
-        "model__max_depth": (2, 15),
+        "model__n_estimators": (5, 30),
+        "model__max_depth": (2, 12),
         "model__learning_rate": (0.003, 0.1),
         "model__colsample_bytree": (0.5, 1)
     }
@@ -145,6 +146,239 @@ def xgb_pipeline(df, run_name, fhe_mode="execute", gfp=False):
 
     ##################### OVERALL RESULTS #####################
     ratio_elapsed_time = elapsed_time_fhe / elapsed_time_clear
+    logging.info("Prediction time of FHE / unencrypted: {:.2f}x".format(ratio_elapsed_time))
+    wandb.run.summary["time/fhe_to_unencrypted_time_ratio"] = ratio_elapsed_time
+    logging.info(f"Results similarity between FHE and unencrypted: {int((y_pred_fhe == y_pred_clear).mean()*100)}%")
+
+    wandb.finish()
+
+def xgb_batch_pipeline(df, run_name, fhe_mode="execute", gfp=False, batch_size=128):
+    '''
+    Runs XGBoost pipeline in batches
+    '''
+    ##################### WANDB INITIALIZATION #####################
+    wandb.init(
+            mode="online",
+            project="GFP_XGBoost", #replace this with your wandb project name if you want to use wandb logging
+            name=run_name,
+    )
+    logging.info(f"Wandb run ({wandb.run.name}) initialized")
+
+    ####################### TRAIN TEST SPLIT #######################
+
+    #Split df
+    df_train, df_test = split_data(df, test_size=0.2)
+
+    #x and y
+    X_train = df_train.drop(["Is Laundering"], axis=1)
+    y_train = df_train["Is Laundering"]
+
+    X_test = df_test.drop(["Is Laundering"], axis=1)
+    y_test = df_test["Is Laundering"]
+
+
+    ####################### GFP ENRICHMENT #######################
+    
+    if gfp==True:
+      #  X_train, X_test = gfp_train_test_enrichment(X_train, X_test)
+        X_train = gfp_enrichment(X_train)
+        X_test = gfp_enrichment(X_test)
+        
+        X_train.to_csv(f"../data/{run_name}_X_train.csv", index=False)
+        X_test.to_csv(f"../data/{run_name}_X_test.csv", index=False)
+
+    ####################### XGBOOST PIPELINE #######################
+    logging.info("Building XGBoost pipeline")
+    # Define our model
+    model = XGBClassifier(n_jobs=1, n_bits=3)
+
+    # Define the pipeline
+    # We normalize the data and apply a PCA before fitting the model
+    pipeline = Pipeline(
+        [("standard_scaler", StandardScaler()), ("pca", PCA(random_state=0)), ("model", model)]
+    )
+
+    #################### BAYESIAN OPTIMIZATION ####################
+    # Define the parameters to tune
+    param_space = {
+        "model__n_estimators": (5, 30),
+        "model__max_depth": (2, 15),
+        "model__learning_rate": (0.003, 0.1),
+        "model__colsample_bytree": (0.5, 1)
+    }
+
+    bayes_search = BayesSearchCV(
+    pipeline,
+    param_space,
+    n_iter=50,  # Number of parameter settings that are sampled
+    cv=3,       # Number of cross-validation folds
+    n_jobs=-1,  # Use all available cores
+    scoring="accuracy",
+    random_state=42,
+   )
+
+    # Launch the Bayesian optimization
+    bayes_search.fit(X_train, y_train)
+
+    # Save the best parameters found
+    logging.info(f"Best XGB parameters found: {bayes_search.best_params_}")
+
+    best_pipeline = bayes_search.best_estimator_
+
+    print("Best pipeline found: ", best_pipeline)
+    data_transformation_pipeline = best_pipeline[:-1]
+    model = best_pipeline[-1]
+
+    # Calculate the number of batches
+    num_batches = len(X_test) // batch_size
+    if len(X_test) % batch_size != 0:
+        num_batches += 1
+
+    # Initialize lists to store predictions and processing times
+    y_pred_clear_batches = []
+    processing_times_clear = [] 
+    y_pred_fhe_batches = []
+    processing_times_fhe = []
+    ground_truth = y_test
+
+    # Iterate over each batch
+    logging.info("Number of batches: {}".format(num_batches))
+    wandb.log({"num_batches": num_batches})
+    for i in range(num_batches):
+        step_i = i+1
+        # Determine the indices for the current batch
+        start_idx = i * batch_size
+        end_idx = min((i + 1) * batch_size, len(X_test))
+        X_batch = X_test[start_idx:end_idx]
+        ground_truth_batch = y_test[start_idx:end_idx]
+
+        # Transform the current batch
+        X_batch_transformed = data_transformation_pipeline.transform(X_batch)
+
+        ################## CLEAR INFERENCE ##################
+        # Evaluate the model on the current batch
+        start_time_batch = time.time()
+        y_pred_batch = model.predict(X_batch_transformed, fhe="disable")
+        end_time_batch = time.time()
+
+        # Store the processing time for the current batch
+        processing_time_batch = end_time_batch - start_time_batch
+        processing_times_clear.append(processing_time_batch)
+
+        # Store the predictions for the current batch
+        y_pred_clear_batches.append(y_pred_batch)
+
+        ################## CLEAR RESULTS ##################
+        # Compute the metrics for the current batch
+        accuracy_batch = (y_pred_batch == ground_truth_batch).mean()
+        f1_score_batch = f1_score(ground_truth_batch, y_pred_batch)
+        precision_batch = precision_score(ground_truth_batch, y_pred_batch)
+        recall_batch = recall_score(ground_truth_batch, y_pred_batch)
+
+        logging.info(f"\nResults for batch {i}")
+        logging.info("Clear")
+        logging.info("Prediction time for unencrypted: {:.6f}s".format(processing_time_batch))
+        logging.info("Accuracy for unencrypted: {:.4f}".format(accuracy_batch))
+        logging.info("F1 score for unencrypted: {:.4f}".format(f1_score_batch))
+        logging.info("Precision for unencrypted: {:.4f}".format(precision_batch))
+        logging.info("Recall for unencrypted: {:.4f}".format(recall_batch))
+        
+        wandb.log({"time/unencrypted_eval_time": processing_time_batch}, step=step_i)
+        wandb.log({"accuracy/unencrypted": accuracy_batch}, step=step_i)
+        wandb.log({"f1_score/unencrypted": f1_score_batch}, step=step_i)
+        wandb.log({"precision/unencrypted": precision_batch}, step=step_i)
+        wandb.log({"recall/unencrypted": recall_batch}, step=step_i)
+
+        ################# FHE INFERENCE #################
+        model.compile(X_batch_transformed)
+        logging.info("Starting model evaluation on the test set in FHE")
+        # Perform the inference in FHE and run on encrypted inputs
+        start_time_fhe = time.time()
+        y_pred_batch_fhe = model.predict(X_batch_transformed, fhe=fhe_mode)
+        end_time_fhe = time.time()
+
+        # Store the processing time for the current batch
+        processing_time_fhe_batch = end_time_fhe - start_time_fhe
+        processing_times_fhe.append(processing_time_fhe_batch)
+
+        # Store the predictions for the current batch
+        y_pred_fhe_batches.append(y_pred_batch_fhe)
+
+        ################## FHE RESULTS ##################
+        # Compute the metrics for the current batch
+        accuracy_batch_fhe = (y_pred_batch_fhe == ground_truth_batch).mean()
+        f1_score_batch_fhe = f1_score(ground_truth_batch, y_pred_batch_fhe)
+        precision_batch_fhe = precision_score(ground_truth_batch, y_pred_batch_fhe)
+        recall_batch_fhe = recall_score(ground_truth_batch, y_pred_batch_fhe)
+
+        logging.info("FHE")
+        logging.info("Prediction time in FHE: {:.6f}s".format(processing_time_fhe_batch))
+        logging.info("Accuracy in FHE: {:.4f}".format(accuracy_batch_fhe))
+        logging.info("F1 score in FHE: {:.4f}".format(f1_score_batch_fhe))
+        logging.info("Precision in FHE: {:.4f}".format(precision_batch_fhe))
+        logging.info("Recall in FHE: {:.4f}".format(recall_batch_fhe))
+
+        wandb.log({"time/fhe_eval_time": processing_time_fhe_batch}, step=step_i)
+        wandb.log({"accuracy/fhe": accuracy_batch_fhe}, step=step_i)
+        wandb.log({"f1_score/fhe": f1_score_batch_fhe}, step=step_i)
+        wandb.log({"precision/fhe": precision_batch_fhe}, step=step_i)
+        wandb.log({"recall/fhe": recall_batch_fhe}, step=step_i)
+
+    ############## OVERALL RESULTS ##############
+
+    # Concatenate the predictions from all batches
+    y_pred_clear = np.concatenate(y_pred_clear_batches)
+
+    # Compute overall metrics
+    accuracy_clear = (y_pred_clear == y_test).mean()
+    f1_score_clear = f1_score(y_test, y_pred_clear)
+    precision_clear = precision_score(y_test, y_pred_clear)
+    recall_clear = recall_score(y_test, y_pred_clear)
+
+    # Compute the average processing time per batch
+    average_time_clear = np.mean(processing_times_clear)
+    total_time_clear = np.sum(processing_times_clear)
+
+    wandb.run.summary["time/avg_unencrypted_eval_time"] = average_time_clear
+    wandb.run.summary["time/total_unencrypted_eval_time"] = total_time_clear
+    wandb.run.summary["accuracy/overall_unencrypted"] = accuracy_clear
+    wandb.run.summary["f1_score/overall_unencrypted"] = f1_score_clear
+    wandb.run.summary["precision/overall_unencrypted"] = precision_clear
+    wandb.run.summary["recall/overall_unencrypted"] = recall_clear
+    logging.info("\nOverall results")
+    logging.info("Average Prediction time for unencrypted: {:.6f}s".format(average_time_clear))
+    logging.info("Total Prediction time for unencrypted: {:.6f}s".format(total_time_clear))
+    logging.info("Accuracy for unencrypted: {:.4f}".format(accuracy_clear))
+    logging.info("F1 score for unencrypted: {:.4f}".format(f1_score_clear))
+    logging.info("Precision for unencrypted: {:.4f}".format(precision_clear))
+    logging.info("Recall for unencrypted: {:.4f}".format(recall_clear))
+
+    # Concatenate the predictions from all batches
+    y_pred_fhe = np.concatenate(y_pred_fhe_batches)
+
+    # Compute overall metrics
+    accuracy_fhe = (y_pred_fhe == ground_truth).mean()
+    f1_score_fhe = f1_score(ground_truth, y_pred_fhe)
+    precision_fhe = precision_score(ground_truth, y_pred_fhe)
+    recall_fhe = recall_score(ground_truth, y_pred_fhe)
+
+    average_time_fhe = np.mean(processing_times_fhe)
+    total_time_fhe = np.sum(processing_times_fhe)
+
+    wandb.run.summary["time/avg_fhe_eval_time"] = average_time_fhe
+    wandb.run.summary["time/total_fhe_eval_time"] = total_time_fhe
+    wandb.run.summary["accuracy/overall_fhe"] = accuracy_fhe
+    wandb.run.summary["f1_score/overall_fhe"] = f1_score_fhe
+    wandb.run.summary["precision/overall_fhe"] = precision_fhe
+    wandb.run.summary["recall/overall_fhe"] = recall_fhe
+    logging.info("Prediction time in FHE: {:.6f}s".format(average_time_fhe))
+    logging.info("Total Prediction time in FHE: {:.6f}s".format(total_time_fhe))
+    logging.info("Accuracy in FHE: {:.4f}".format(accuracy_fhe))
+    logging.info("F1 score in FHE: {:.4f}".format(f1_score_fhe))
+    logging.info("Precision in FHE: {:.4f}".format(precision_fhe))
+    logging.info("Recall in FHE: {:.4f}".format(recall_fhe))
+
+    ratio_elapsed_time = average_time_fhe / average_time_clear
     logging.info("Prediction time of FHE / unencrypted: {:.2f}x".format(ratio_elapsed_time))
     wandb.run.summary["time/fhe_to_unencrypted_time_ratio"] = ratio_elapsed_time
     logging.info(f"Results similarity between FHE and unencrypted: {int((y_pred_fhe == y_pred_clear).mean()*100)}%")
@@ -405,7 +639,8 @@ def xgb_experiment_max_depth(df, run_name, fhe_mode="execute", gfp=False):
         precisions_fhe = []
         recalls_fhe = []
         ratio_elapsed_times = []
-        max_depth = list(range(1,16))
+       # max_depth = list(range(1,16))
+        max_depth = [1,2,4,8,16]
         wandb.run.summary["max_depth"] = max_depth
         logging.info("max_depth: {}".format(max_depth))
 
