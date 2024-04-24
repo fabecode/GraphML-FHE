@@ -5,6 +5,7 @@ import json
 import logging
 import pandas as pd
 from IPython.display import display
+import wandb
 
 ######################### PARAMETERS #########################
 params = {
@@ -12,10 +13,10 @@ params = {
     "time_window": 86400,            # time window used if no pattern was specified
     
     "vertex_stats": True,         # produce vertex statistics
-    "vertex_stats_cols": [3],     # produce vertex statistics using the selected input columns
+    "vertex_stats_cols": [4, 5],     # produce vertex statistics using the selected input columns
     
     # features: 0:fan,1:deg,2:ratio,3:avg,4:sum,5:min,6:max,7:median,8:var,9:skew,10:kurtosis
-    "vertex_stats_feats": [0, 1, 2],  # fan,deg,ratio
+   "vertex_stats_feats": [4, 8, 9],  # sum, var, skew
     
     # fan in/out parameters
     "fan": True,
@@ -47,8 +48,9 @@ params = {
 ######################### FUNCTIONS #########################
 
 def gfp_train_test_enrichment(X_train_df, X_test_df):
-    X_train_simple = X_train_df[["EdgeID", "SourceAccountId", "TargetAccountId", "Timestamp"]]
-    X_test_simple = X_test_df[["EdgeID", "SourceAccountId", "TargetAccountId", "Timestamp"]]
+
+    X_train_simple = X_train_df[["EdgeID", "SourceAccountId", "TargetAccountId", "Timestamp", "Amount Sent", "Amount Received"]]
+    X_test_simple = X_test_df[["EdgeID", "SourceAccountId", "TargetAccountId", "Timestamp", "Amount Sent", "Amount Received"]]
 
     colnames_original = X_train_simple .columns.tolist()
 
@@ -58,6 +60,7 @@ def gfp_train_test_enrichment(X_train_df, X_test_df):
 
     # Create a Graph Feature Preprocessor, set its configuration using the above dictionary and verify it
     logging.info(f"Creating a graph feature preprocessor with {params}")
+    wandb.config.update(params)
     gp = GraphFeaturePreprocessor()
     gp.set_params(params)
 
@@ -86,9 +89,9 @@ def gfp_train_test_enrichment(X_train_df, X_test_df):
     return X_train_enriched, X_test_enriched
 
 def gfp_enrichment(df):
-    df_simple = df[["EdgeID", "SourceAccountId", "TargetAccountId", "Timestamp"]]
+    df_simple = df[["EdgeID", "SourceAccountId", "TargetAccountId", "Timestamp", "Amount Sent", "Amount Received"]]
 
-    colnames_original = ["EdgeID", "SourceAccountId", "TargetAccountId", "Timestamp"]
+    colnames_original = ["EdgeID", "SourceAccountId", "TargetAccountId", "Timestamp", "Amount Sent", "Amount Received"]
 
     #convert df to numpy
     data = df_simple.to_numpy()
@@ -102,6 +105,7 @@ def gfp_enrichment(df):
     print("Enriching the transactions with new graph features ")
     # the fit_transform and transform functions are equivalent
     # these functions can run on single transactions or on batches of transactions
+    data = np.ascontiguousarray(data)
     data_enriched = gp.fit_transform(data.astype("float64")) 
 
     logging.info(f"Raw dataset shape: {data.shape}")
@@ -109,14 +113,8 @@ def gfp_enrichment(df):
 
     colnames_generated = generate_enriched_df_colnames(gp.get_params(), colnames_original)
     df_enriched = pd.DataFrame(data_enriched, columns=colnames_generated)
-    df_enriched = df_enriched.drop(["EdgeID", "SourceAccountId", "TargetAccountId", "Timestamp"], axis=1)
 
-    #reset both indexes, then concat side by side
-    df = df.reset_index(drop=True)
-    df_enriched = df_enriched.reset_index(drop=True)
-    df_enriched_2 = pd.concat([df, df_enriched], axis=1)
-
-    return df_enriched_2
+    return df_enriched
 
 def generate_enriched_df_colnames(params, colnames):
         '''
@@ -147,18 +145,19 @@ def generate_enriched_df_colnames(params, colnames):
         vert_feat_names = ["fan","deg","ratio","avg","sum","min","max","median","var","skew","kurtosis"]
 
         # add features names for the vertex statistics
-        for orig in ['source', 'dest']:
-            for direction in ['out', 'in']:
-                # add fan, deg, and ratio features
-                for k in [0, 1, 2]:
-                    if k in params["vertex_stats_feats"]:
-                        feat_name = orig + "_" + vert_feat_names[k] + "_" + direction
-                        colnames.append(feat_name)
-                for col in params["vertex_stats_cols"]:
-                    # add avg, sum, min, max, median, var, skew, and kurtosis features
-                    for k in [3, 4, 5, 6, 7, 8, 9, 10]:
+        if params['vertex_stats'] == True:
+            for orig in ['source', 'dest']:
+                for direction in ['out', 'in']:
+                    # add fan, deg, and ratio features
+                    for k in [0, 1, 2]:
                         if k in params["vertex_stats_feats"]:
-                            feat_name = orig + "_" + vert_feat_names[k] + "_col" + str(col) + "_" + direction
+                            feat_name = orig + "_" + vert_feat_names[k] + "_" + direction
                             colnames.append(feat_name)
+                    for col in params["vertex_stats_cols"]:
+                        # add avg, sum, min, max, median, var, skew, and kurtosis features
+                        for k in [3, 4, 5, 6, 7, 8, 9, 10]:
+                            if k in params["vertex_stats_feats"]:
+                                feat_name = orig + "_" + vert_feat_names[k] + "_col" + str(col) + "_" + direction
+                                colnames.append(feat_name)
 
         return colnames
