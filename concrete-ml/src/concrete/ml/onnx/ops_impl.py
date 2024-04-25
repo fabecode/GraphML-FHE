@@ -1999,7 +1999,7 @@ def numpy_slice(
     starts: numpy.ndarray,
     ends: numpy.ndarray,
     axes: Optional[numpy.ndarray],
-    steps: Optional[numpy.ndarray],
+    steps: Optional[numpy.ndarray] = 1,
 ) -> Tuple[numpy.ndarray]:
     """Slice the input according to ONNX spec.
 
