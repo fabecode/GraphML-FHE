@@ -1918,7 +1918,8 @@ def numpy_concatenate(*x: numpy.ndarray, axis: int) -> Tuple[numpy.ndarray]:
     Returns:
         Tuple[numpy.ndarray]: Output tensor.
     """
-    return (numpy.concatenate(x, axis=axis),)
+    x_int = numpy.round(x).astype(numpy.int64)
+    return (numpy.concatenate(x_int, axis=axis),)
 
 
 @onnx_func_raw_args("axis")
