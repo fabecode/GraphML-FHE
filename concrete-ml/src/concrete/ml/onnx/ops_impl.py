@@ -2122,7 +2122,7 @@ def numpy_expand(x: numpy.ndarray, shape: Optional[Tuple[int]] = None) -> Tuple[
     Returns:
         Tuple[numpy.ndarray]: Output tensor.
     """
-    target_shape = numpy.array(shape, dtype=int)
+    target_shape = numpy.array(tuple(shape[::-1]), dtype=int)
     shape_difference = len(target_shape) - len(x.shape)
 
     assert_true(shape_difference >= 0, "Target shape cannot have fewer dimensions than input shape")
