@@ -1,0 +1,4 @@
+FROM zamafhe/concrete-ml
+WORKDIR /project
+COPY ./train.py ./train.py
+ENTRYPOINT python train.py

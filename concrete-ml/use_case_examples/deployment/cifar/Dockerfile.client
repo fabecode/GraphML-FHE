@@ -1,0 +1,7 @@
+FROM zamafhe/concrete-ml
+WORKDIR /project
+COPY client.py .
+COPY client_requirements.txt .
+RUN python -m pip install -r client_requirements.txt
+RUN python -m pip install torchvision==0.14.1 --no-deps
+ENTRYPOINT /bin/bash
