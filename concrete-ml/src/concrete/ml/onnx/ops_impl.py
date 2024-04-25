@@ -2199,3 +2199,62 @@ def numpy_unfold(
     res = res.reshape((res.shape[0], res.shape[1], -1))
 
     return (res,)
+
+def numpy_scatter_elements(data, indices, updates, axis=0):  # ADDED
+    if axis < 0:
+        axis = data.ndim + axis
+
+    indices = numpy.transpose(indices) #ADDED
+    idx_xsection_shape = indices.shape[:axis] + indices.shape[axis + 1 :]
+
+    def make_slice(arr, axis, i):  # type: ignore
+        slc = [slice(None)] * arr.ndim
+        slc[axis] = i
+        return slc
+
+    def unpack(packed):  # type: ignore
+        unpacked = packed[0]
+        for i in range(1, len(packed)):
+            unpacked = unpacked, packed[i]
+        return unpacked
+
+    def make_indices_for_duplicate(idx):  # type: ignore
+        final_idx = []
+        for i in range(len(idx[0])):
+            final_idx.append(  # noqa: PERF401
+                tuple(idx_element[i] for idx_element in idx)
+            )
+        return list(final_idx)
+
+    # We use indices and axis parameters to create idx
+    # idx is in a form that can be used as a NumPy advanced indices for scattering of updates param. in data
+    idx = [
+        [
+            unpack(numpy.indices(idx_xsection_shape).reshape(indices.ndim - 1, -1)),
+            indices[tuple(make_slice(indices, axis, i))].reshape(1, -1)[0],
+        ]
+        for i in range(indices.shape[axis])
+    ]
+    idx = list(numpy.concatenate(idx, axis=1))
+    idx.insert(axis, idx.pop())
+
+    # updates_idx is a NumPy advanced indices for indexing of elements in the updates
+    updates_idx = list(idx)
+    updates_idx.pop(axis)
+    updates_idx.insert(
+        axis, numpy.repeat(numpy.arange(indices.shape[axis]), numpy.prod(idx_xsection_shape))
+    )
+
+    print("Updates array:", updates)
+    print("Updates shape:", updates.shape) #(3211, 66)
+    print("Updates idx shape:", [arr.shape for arr in updates_idx]) #[(211926,), (211926,)]
+    print("updates_idx for indexing elements in updates:", updates_idx)
+    print("Maximum update value along axis 0:", numpy.max(updates_idx[0])) #65
+    print("Maximum update value along axis 1:", numpy.max(updates_idx[1])) #3210
+
+
+    scattered = numpy.copy(data)
+    scattered[tuple(idx)] = updates[tuple(updates_idx)]
+    
+    #return as a tuple
+    return (scattered,)
