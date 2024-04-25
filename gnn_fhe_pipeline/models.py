@@ -107,6 +107,9 @@ class GINe_FHE(torch.nn.Module):
         #Keep track of pruned layers
         self.pruned_layers = set()
 
+        #Intialise quant identity layer
+        self.quant_inp = qnn.QuantIdentity()
+
         for _ in range(self.num_gnn_layers):
             # Quantized GINEConv layers
             print(f"Conv layer: {self.n_hidden}, {self.n_hidden}, {weight_bit_width}")
@@ -161,13 +164,16 @@ class GINe_FHE(torch.nn.Module):
         print("x before reshape: ", x)
         #add try catch blocks for line below
         try:
+            x = self.quant_inp(x)
             x = x[edge_index.T].reshape(-1, 2 * self.n_hidden).relu()
         except Exception as e:
             print(f"An error occurred in the relu line: {e}")
         
         print("x after processing: ", x)
         try:
-            x = torch.cat((x, edge_attr.view(-1, edge_attr.shape[1])), 1)
+            x = self.quant_inp(x)
+            y = self.quant_inp(edge_attr.view(-1, edge_attr.shape[1]))
+            x = torch.cat((x, y), 1)
         except Exception as e:
             print(f"An error occurred in the cat line: {e}")
         out = x
