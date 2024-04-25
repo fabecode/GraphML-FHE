@@ -1918,9 +1918,15 @@ def numpy_concatenate(*x: numpy.ndarray, axis: int) -> Tuple[numpy.ndarray]:
     Returns:
         Tuple[numpy.ndarray]: Output tensor.
     """
-    x_int = numpy.round(x).astype(numpy.int64)
-    return (numpy.concatenate(x_int, axis=axis),)
-
+    if len(x[0]) == 1:
+        x_int = numpy.round(x).astype(numpy.int64)
+        print("x_int:", x_int)
+        return (numpy.concatenate(x_int, axis=axis),)
+    else:
+        concatenated_array = numpy.concatenate((x[0], x[1]), axis=1)
+        return (concatenated_array,)
+    
+    
 
 @onnx_func_raw_args("axis")
 def numpy_unsqueeze(x: numpy.ndarray, axis: Iterable) -> Tuple[numpy.ndarray]:
