@@ -2653,3 +2653,8 @@ class QuantizedUnfold(QuantizedMixingOp):
             stats=self.output_quant_stats,
             params=self.output_quant_params,
         )
+
+class QuantizedScatterElements(QuantizedOp):
+    """Quantized ScatterElements."""
+
+    _impl_for_op_named: str = "ScatterElements"
