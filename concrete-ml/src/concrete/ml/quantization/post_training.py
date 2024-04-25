@@ -538,11 +538,14 @@ class ONNXConverter:
                     continue
 
                 if quantized_op_class.must_quantize_input(input_idx):
+                    print("op_type:", op_type, "\nvalue:", value) #ADDED
                     if isinstance(value, QuantizedArray):
                         curr_cst_inputs[input_idx] = value
                     else:
                         # Initializers are ndarray or scalar
-                        assert isinstance(value, (numpy.ndarray, float, int, bool))
+                        assert isinstance(value, (numpy.ndarray, numpy.int64, float, int, bool))
+                        if isinstance(value, numpy.int64): #ADDED
+                            value = float(float(value)) #ADDED - to cast to float
                         curr_cst_inputs[input_idx] = self._process_initializer(
                             self.n_bits_op_weights, value
                         )
